@@ -25,7 +25,7 @@
 inline const char* TitanLogShorterFileName(const char* file) {
   // 15 is the length of "titan_logging.h".
   // If the name of this file changed, please change this number, too.
-  return file + (sizeof(__FILE__) > 15 ? sizeof(__FILE__) - 15 : 0);
+  return file + (sizeof(__FILE__) > 20 ? sizeof(__FILE__) - 20 : 0);
 }
 
 // Don't inclide file/line info in HEADER level

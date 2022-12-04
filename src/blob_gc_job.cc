@@ -1,5 +1,7 @@
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
+#include "db/version_set.h"
+#include "rocksdb/types.h"
 #endif
 #include "blob_gc_job.h"
 
@@ -146,7 +148,15 @@ Status BlobGCJob::DoRunGC() {
   std::unique_ptr<BlobFileMergeIterator> gc_iter;
   s = BuildIterator(&gc_iter);
   if (!s.ok()) return s;
-  if (!gc_iter) return Status::Aborted("Build iterator for gc failed");
+  //if (!gc_iter) return Status::Aborted("Build iterator for gc failed");
+  // If there is no need to iterate blob files, return immediately.
+  if (!gc_iter) {
+      for (auto& f : blob_gc_->inputs()) {
+        metrics_.gc_num_keys_overwritten += f->file_entries();
+        metrics_.gc_bytes_overwritten += f->live_data_size();
+      }
+    return Status::OK();
+  }
 
   // Similar to OptimisticTransaction, we obtain latest_seq from
   // base DB, which is guaranteed to be no smaller than the sequence of
@@ -318,6 +328,10 @@ Status BlobGCJob::BuildIterator(
   assert(!inputs.empty());
   std::vector<std::unique_ptr<BlobFileIterator>> list;
   for (std::size_t i = 0; i < inputs.size(); ++i) {
+    // If input file live size is zero, there is no need to create file reader.
+    if (inputs[i]->NoLiveData())
+      continue;
+
     std::unique_ptr<RandomAccessFileReader> file;
     // TODO(@DorianZheng) set read ahead size
     s = NewBlobFileReader(inputs[i]->file_number(), 0, db_options_,
@@ -330,9 +344,10 @@ Status BlobGCJob::BuildIterator(
         blob_gc_->titan_cf_options())));
   }
 
-  if (s.ok())
+  if (s.ok() && !list.empty()) {
     result->reset(new BlobFileMergeIterator(
         std::move(list), blob_gc_->titan_cf_options().comparator));
+  }
 
   return s;
 }
@@ -424,7 +439,11 @@ Status BlobGCJob::InstallOutputBlobFiles() {
     auto file = std::make_shared<BlobFileMeta>(
         builder.first->GetNumber(), builder.first->GetFile()->GetFileSize(), 0,
         0, builder.second->GetSmallestKey(), builder.second->GetLargestKey());
-    file->set_live_data_size(builder.second->live_data_size());
+    TITAN_LOG_BUFFER(
+        log_buffer_, "[%s] GC output blob file %ld, live data size %ld",
+        blob_gc_->column_family_handle()->GetName().c_str(),
+        builder.first->GetNumber(), builder.second->live_data_size());
+    // file->set_live_data_size(builder.second->live_data_size());
     file->FileStateTransit(BlobFileMeta::FileEvent::kGCOutput);
     RecordInHistogram(statistics(stats_), TITAN_GC_OUTPUT_FILE_SIZE,
                       file->file_size());
@@ -435,7 +454,7 @@ Status BlobGCJob::InstallOutputBlobFiles() {
     files.emplace_back(std::make_pair(file, std::move(builder.first)));
   }
   if (s.ok()) {
-    TITAN_LOG_BUFFER(log_buffer_, "[%s] output[%s]",
+    TITAN_LOG_BUFFER(log_buffer_, "[%s] Titan GC output[%s]",
                      blob_gc_->column_family_handle()->GetName().c_str(),
                      tmp.c_str());
     s = blob_file_manager_->BatchFinishFiles(
@@ -551,26 +570,39 @@ Status BlobGCJob::RewriteValidKeyToLSM() {
 
   mutex_->Lock();
   auto cf_id = blob_gc_->column_family_handle()->GetID();
-  for (auto blob_file : dropped) {
-    auto blob_storage = blob_file_set_->GetBlobStorage(cf_id).lock();
-    if (blob_storage) {
-      auto file = blob_storage->FindFile(blob_file.first).lock();
-      if (!file) {
-        TITAN_LOG_ERROR(db_options_.info_log,
-                        "Blob File %" PRIu64 " not found when GC.",
-                        blob_file.first);
-        continue;
-      }
-      SubStats(stats_, cf_id, file->GetDiscardableRatioLevel(), 1);
-      file->UpdateLiveDataSize(-blob_file.second);
-      AddStats(stats_, cf_id, file->GetDiscardableRatioLevel(), 1);
-
-      blob_storage->ComputeGCScore();
-    } else {
-      TITAN_LOG_ERROR(db_options_.info_log,
-                      "Column family id:%" PRIu32 " not Found when GC.", cf_id);
+  auto blob_storage = blob_file_set_->GetBlobStorage(cf_id).lock();
+  if (blob_storage) {
+    SequenceNumber latest_sequence = db_impl->GetLatestSequenceNumber();
+    for (auto &file : blob_gc_->outputs()) {
+      blob_storage->AddGcOutputBlobFile(file->file_number(), latest_sequence);
     }
   }
+  for (auto blob_file : dropped) {
+    TITAN_LOG_BUFFER(log_buffer_,
+                     "Drop %ld bytes from GC output blob file %ld.",
+                     blob_file.second, blob_file.first);
+  }
+
+  // for (auto blob_file : dropped) {
+  //   auto blob_storage = blob_file_set_->GetBlobStorage(cf_id).lock();
+  //   if (blob_storage) {
+  //     auto file = blob_storage->FindFile(blob_file.first).lock();
+  //     if (!file) {
+  //       TITAN_LOG_ERROR(db_options_.info_log,
+  //                       "Blob File %" PRIu64 " not found when GC.",
+  //                       blob_file.first);
+  //       continue;
+  //     }
+  //     SubStats(stats_, cf_id, file->GetDiscardableRatioLevel(), 1);
+  //     file->UpdateLiveDataSize(-blob_file.second);
+  //     AddStats(stats_, cf_id, file->GetDiscardableRatioLevel(), 1);
+
+  //     blob_storage->ComputeGCScore();
+  //   } else {
+  //     TITAN_LOG_ERROR(db_options_.info_log,
+  //                     "Column family id:%" PRIu32 " not Found when GC.", cf_id);
+  //   }
+  // }
   mutex_->Unlock();
 
   if (s.ok()) {

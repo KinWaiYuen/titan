@@ -17,6 +17,8 @@ enum Tag {
   kDeletedBlobFile = 12,  // Deprecated, leave here for backward compatibility
   kAddedBlobFileV2 = 13,  // Comparing to kAddedBlobFile, it newly includes
                           // smallest_key and largest_key of blob file
+  kUnfinalizedBlobFile = 14,
+  kFinalizedBlobFile = 15
 };
 
 class VersionEdit {
@@ -34,6 +36,14 @@ class VersionEdit {
 
   void DeleteBlobFile(uint64_t file_number, SequenceNumber obsolete_sequence) {
     deleted_files_.emplace_back(std::make_pair(file_number, obsolete_sequence));
+  }
+
+  void AddGcOutputBlobFile(uint64_t file_number, SequenceNumber obsolete_sequence) {
+    unfinalized_gc_output_files_.emplace_back(std::make_pair(file_number, obsolete_sequence));
+  }
+
+  void FinalizeGcOutputBlobFile(uint64_t file_number) {
+    finalized_gc_output_files_.emplace_back(file_number);
   }
 
   void EncodeTo(std::string* dst) const;
@@ -54,6 +64,8 @@ class VersionEdit {
 
   std::vector<std::shared_ptr<BlobFileMeta>> added_files_;
   std::vector<std::pair<uint64_t, SequenceNumber>> deleted_files_;
+  std::vector<std::pair<uint64_t, SequenceNumber>> unfinalized_gc_output_files_;
+  std::vector<uint64_t> finalized_gc_output_files_;
 };
 
 }  // namespace titandb

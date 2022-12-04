@@ -1,5 +1,6 @@
 #include "version_edit.h"
 
+#include "rocksdb/types.h"
 #include "util/coding.h"
 
 namespace rocksdb {
@@ -20,11 +21,22 @@ void VersionEdit::EncodeTo(std::string* dst) const {
     // obsolete sequence is a inpersistent field, so no need to encode it.
     PutVarint32Varint64(dst, kDeletedBlobFile, file.first);
   }
+
+  for(auto& file: unfinalized_gc_output_files_) {
+    PutVarint32(dst, kUnfinalizedBlobFile);
+    PutVarint64(dst, file.first);
+    PutVarint64(dst, file.second);
+  }
+  for(auto& file_number: finalized_gc_output_files_) {
+    PutVarint32(dst, kFinalizedBlobFile);
+    PutVarint64(dst, file_number);
+  }
 }
 
 Status VersionEdit::DecodeFrom(Slice* src) {
   uint32_t tag;
   uint64_t file_number;
+  SequenceNumber sequence_number;
   std::shared_ptr<BlobFileMeta> blob_file;
   Status s;
 
@@ -72,6 +84,21 @@ Status VersionEdit::DecodeFrom(Slice* src) {
           DeleteBlobFile(file_number, 0);
         } else {
           error = "deleted blob file";
+        }
+        break;
+      case kUnfinalizedBlobFile:
+        if (GetVarint64(src, &file_number) &&
+            GetVarint64(src, &sequence_number)) {
+          AddGcOutputBlobFile(file_number, sequence_number);
+        } else {
+          error = "unfinalized gc output blob file";
+        }
+        break;
+      case kFinalizedBlobFile:
+        if (GetVarint64(src, &file_number)) {
+          FinalizeGcOutputBlobFile(file_number);
+        } else {
+          error = "unfinalized gc output blob file";
         }
         break;
       default:
@@ -123,6 +150,20 @@ void VersionEdit::Dump(bool with_keys) const {
     for (auto& file : deleted_files_) {
       fprintf(stdout, "file %" PRIu64 ", seq %" PRIu64 "\n", file.first,
               file.second);
+    }
+  }
+  if (!unfinalized_gc_output_files_.empty()) {
+    fprintf(stdout, "unfinalized gc output blob files:\n");
+    for (auto& file : unfinalized_gc_output_files_) {
+      fprintf(stdout, "file %" PRIu64 ", seq %" PRIu64 "\n", file.first,
+              file.second);
+    }
+  }
+
+  if (!finalized_gc_output_files_.empty()) {
+    fprintf(stdout, "finalized gc output blob files:\n");
+    for (auto& file_number : finalized_gc_output_files_) {
+      fprintf(stdout, "file %" PRIu64 "\n", file_number);
     }
   }
 }

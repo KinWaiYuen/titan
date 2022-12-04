@@ -22,6 +22,7 @@ class BlobGC {
   ~BlobGC();
 
   const std::vector<std::shared_ptr<BlobFileMeta>>& inputs() { return inputs_; }
+  const std::vector<BlobFileMeta*>& outputs() { return outputs_; }
 
   const TitanCFOptions& titan_cf_options() { return titan_cf_options_; }
 

@@ -1,4 +1,6 @@
 #pragma once
+#include "rocksdb/types.h"
+#include <cstdint>
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
 #endif
@@ -111,6 +113,10 @@ class BlobStorage {
   // founded.
   bool MarkFileObsolete(uint64_t file_number, SequenceNumber obsolete_sequence);
 
+  void AddGcOutputBlobFile(uint64_t file_number,
+                           SequenceNumber sequence_number);
+  void MaybeFinalizeGcOutputBlobFile(SequenceNumber sequence_number);
+
   // Returns the number of blob files, including obsolete files.
   std::size_t NumBlobFiles() const {
     MutexLock l(&mutex_);
@@ -186,6 +192,7 @@ class BlobStorage {
   // in-memory data structure can be destroyed. Physical files may still be
   // kept.
   bool destroyed_;
+  std::list<std::pair<uint64_t, SequenceNumber>> unfinalized_gc_output_files_;
 
   TitanStats* stats_;
 };

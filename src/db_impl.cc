@@ -1215,6 +1215,18 @@ void TitanDBImpl::OnFlushCompleted(const FlushJobInfo& flush_job_info) {
       if (file == nullptr) {
         continue;
       }
+      if (file->file_state() == BlobFileMeta::FileState::kPendingGC) {
+        // This file is output of a GC job
+        // Live size may be updated by compaction callback or former flush callback
+        file->UpdateLiveDataSize(delta);
+        TITAN_LOG_INFO(db_options_.info_log,
+                       "OnFlushCompleted[%d]: update live size of GC output "
+                       "blob file %ld, live data size is %ld.",
+                       flush_job_info.job_id, file->file_number(),
+                       file->live_data_size());
+        continue;
+      }
+
       if (file->file_state() != BlobFileMeta::FileState::kPendingLSM) {
         // This file may be output of a GC job.
         TITAN_LOG_INFO(db_options_.info_log,
@@ -1256,6 +1268,8 @@ void TitanDBImpl::OnFlushCompleted(const FlushJobInfo& flush_job_info) {
                      flush_job_info.job_id, file->file_number(),
                      file->live_data_size());
     }
+    // Try finalize some gc output files
+    blob_storage->MaybeFinalizeGcOutputBlobFile(flush_job_info.largest_seqno);
   }
   TEST_SYNC_POINT("TitanDBImpl::OnFlushCompleted:Finished");
 }
@@ -1324,6 +1338,17 @@ void TitanDBImpl::OnCompactionCompleted(
       std::shared_ptr<BlobFileMeta> file = bs->FindFile(file_number).lock();
       if (file == nullptr || file->is_obsolete()) {
         // File has been GC out.
+        continue;
+      }
+      if (file->file_state() == BlobFileMeta::FileState::kPendingGC) {
+        // This file is output of a GC job
+        // Live size may be updated by compaction callback or former flush callback
+        file->UpdateLiveDataSize(delta);
+        TITAN_LOG_INFO(db_options_.info_log,
+                       "OnFlushCompleted[%d]: update live size of gc output "
+                       "file %ld, live size is %ld.",
+                       compaction_job_info.job_id, file->file_number(),
+                       file->live_data_size());
         continue;
       }
       if (file->file_state() == BlobFileMeta::FileState::kPendingLSM) {
@@ -1403,6 +1428,12 @@ void TitanDBImpl::OnCompactionCompleted(
           // Mark last two level blob files to merge in next compaction if
           // discardable size reached GC threshold
           if (file->NoLiveData()) {
+            TITAN_LOG_INFO(
+                db_options_.info_log,
+                "OnCompactionCompleted[%d]: Blob file %" PRIu64
+                "[level=%d] live size is zero, add it to obsolete file list",
+                compaction_job_info.job_id, file->file_number(),
+                file->file_level());
             edit.DeleteBlobFile(file->file_number(),
                                 db_impl_->GetLatestSequenceNumber());
           } else if (static_cast<int>(file->file_level()) >=
@@ -1410,6 +1441,12 @@ void TitanDBImpl::OnCompactionCompleted(
                      file->GetDiscardableRatio() >
                          cf_options.blob_file_discardable_ratio) {
             file->FileStateTransit(BlobFileMeta::FileEvent::kNeedMerge);
+            TITAN_LOG_INFO(
+                db_options_.info_log,
+                "OnCompactionCompleted[%d]: Blob file %" PRIu64
+                "[level=%d] discardable ratio is %f, mark it to merge.",
+                compaction_job_info.job_id, file_number, file->file_level(),
+                file->GetDiscardableRatio());
           } else {
             if (count_sorted_run) {
               to_merge_candidates.push_back(file);

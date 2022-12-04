@@ -2,6 +2,8 @@
 
 #include "blob_file_set.h"
 #include "titan_logging.h"
+#include "titan_stats.h"
+#include <utility>
 
 namespace rocksdb {
 namespace titandb {
@@ -225,6 +227,37 @@ void BlobStorage::ComputeGCScore() {
             [](const GCScore& first, const GCScore& second) {
               return first.score > second.score;
             });
+  for (auto gcs : gc_score_) {
+    TITAN_LOG_INFO(db_options_.info_log, "Blob file %lu discardable ratio is %f",
+                   gcs.file_number, gcs.score);
+  }
+}
+
+void BlobStorage::AddGcOutputBlobFile(uint64_t file_number,
+                                      SequenceNumber sequence_number) {
+  TITAN_LOG_INFO(db_options_.info_log,
+                 "Add GC output blob file %ld, sequence is %ld.", file_number,
+                 sequence_number);
+  unfinalized_gc_output_files_.emplace_back(file_number, sequence_number);
+}
+
+void BlobStorage::MaybeFinalizeGcOutputBlobFile(
+    SequenceNumber sequence_number) {
+  MutexLock l(&mutex_);
+
+  while (!unfinalized_gc_output_files_.empty()) {
+    auto file_number = unfinalized_gc_output_files_.front();
+    if (sequence_number < file_number.second) {
+      break;
+    }
+
+    unfinalized_gc_output_files_.pop_front();
+    auto file = files_.find(file_number.first);
+    file->second->FileStateTransit(BlobFileMeta::FileEvent::kGCCompleted);
+    TITAN_LOG_INFO(db_options_.info_log,
+                   "GC output blob file %ld is finalized.", file_number.first);
+    file_number = unfinalized_gc_output_files_.front();
+  }
 }
 
 }  // namespace titandb
